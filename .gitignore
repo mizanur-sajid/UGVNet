@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Notebooks and IDEs
+.ipynb_checkpoints/
+.idea/
+.vscode/
+
+# Training data and generated artifacts
+data/
+runs/
+cache/
+/checkpoints/
+*.pt
+*.pth
+*.onnx
+
+results/*
+!results/README.md
+!results/colab/
+results/colab/*
+!results/colab/.gitkeep
+
+models/best/*
+!models/best/colab/
+models/best/colab/*
+!models/best/colab/.gitkeep
+models/checkpoints/*
+!models/checkpoints/colab/
+models/checkpoints/colab/*
+!models/checkpoints/colab/.gitkeep
+
+reports/*
+!reports/README.md
+!reports/colab/
+reports/colab/*
+!reports/colab/.gitkeep
+
+tensorboard/*
+!tensorboard/README.md
+!tensorboard/colab/
+tensorboard/colab/*
+!tensorboard/colab/.gitkeep
+
+# Operating-system metadata
+[Dd]esktop.ini
+.DS_Store
+Thumbs.db
