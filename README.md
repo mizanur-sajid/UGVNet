@@ -26,6 +26,7 @@
 - [Pre-Training Dataset Audit](#pre-training-dataset-audit)
 - [Training Configuration](#training-configuration)
 - [TensorBoard](#tensorboard)
+- [ONNX Export and Netron](#onnx-export-and-netron)
 - [Lightweight Variants](#lightweight-variants)
 - [Repository Structure](#repository-structure)
 - [Tests](#tests)
@@ -60,6 +61,7 @@
 - **Backbone freeze/unfreeze** — phased warm-up with frozen backbones
 - **Lightweight variants** — custom `tiny`, `small`, `base` architectures for constrained compute
 - **Mixed precision training** — automatic gradient scaling on CUDA
+- **PyTorch 2.0 compilation** — optional `torch.compile` for faster training on supported hardware
 - **Gentle auto class balancing** — effective-number sampling when imbalance is ≥ 1.5×, avoiding the extreme duplication produced by raw inverse-frequency weights
 - **Class-aware augmentation** — stronger crop, RandAugment, rotation, and erasing diversity only for classes at or below half the largest class
 - **Adaptive loss** — standard smoothed cross-entropy normally, with unweighted focal cross-entropy automatically selected only for severe imbalance (≥ 3×)
@@ -69,6 +71,7 @@
 - **Count-annotated confusion matrices** — adaptive black/white labels in notebook and PDF output
 - **Single-read dataset audit and fused CUDA optimization** — lower storage I/O and optimizer overhead
 - **Full TensorBoard diagnostics** — graphs, scalars, sampled histograms, profiler traces, images, PR curves, embeddings, HParams, and hybrid-fusion internals
+- **ONNX export and Netron visualization** — interactive architecture browser alongside TensorBoard
 
 ---
 
@@ -105,7 +108,7 @@ python -m pip install -e ".[dev,notebooks]"
 | TensorBoard Profiler plugin | ≥ 2.16 |
 | Pillow | ≥ 10 (notebook/reporting extra) |
 
-The `dev` extra installs pytest and Ruff; the `notebooks` extra installs the reporting and table dependencies used outside hosted notebook runtimes.
+The `dev` extra installs pytest and Ruff; the `notebooks` extra installs matplotlib, numpy, pandas, and Pillow for reporting and table rendering outside hosted notebook runtimes.
 
 ---
 
@@ -167,6 +170,9 @@ python scripts/train_hybrid.py \
   --epochs 60 \
   --seed 42 \
   --run-name my_experiment
+
+# Enable PyTorch 2.0 model compilation
+python scripts/train_hybrid.py --data-dir /path/to/dataset --compile
 ```
 
 ### Standalone Dataset Audit
@@ -263,7 +269,7 @@ The same class folders must appear in **all three splits**. Class names are deri
 
 ## Pre-Training Dataset Audit
 
-UGVNet includes a comprehensive dataset integrity scanner that runs automatically before training begins. It decodes and hashes every image using multi-threaded workers to detect:
+UGVNet includes a comprehensive dataset integrity scanner that runs automatically before training begins. It decodes and hashes every image in a single read using multi-threaded workers to detect:
 
 - **Corrupt or unreadable images** — files that fail to decode via PIL
 - **Exact duplicates** — both within-split and cross-split (data leakage)
@@ -300,6 +306,12 @@ report = audit_dataset("/path/to/dataset", report_path="audit.json")
 enforce_audit_policy(report, policy="strict")
 ```
 
+### Audit Caching
+
+Both CLI trainers check for an existing `dataset_audit.json` inside the dataset
+directory and reuse it instead of re-scanning. The cached report is copied into
+the run's results directory for reproducibility.
+
 ---
 
 ## Training Configuration
@@ -327,10 +339,12 @@ Both modes include:
 - **Loss auto-selection** — smoothed cross-entropy by default and focal loss for severe imbalance, without stacking class weights in both sampler and loss
 - **Early stopping** — patience of 12 epochs based on validation macro-F1 (hybrid) or best validation accuracy (lightweight)
 - **Mixed precision** — automatic on CUDA devices (disable with `--no-amp`)
-- **Gradient clipping** — max norm 1.0
+- **Gradient clipping** — max norm 1.0 (hybrid only)
 - **Cosine annealing** — LR schedule over total epochs
 - **Label smoothing** — 0.1 by default
 - **Reproducibility** — seeded RNG for Python, PyTorch, and CUDA
+- **Channels-last memory format** — automatic for CUDA tensors in both trainers
+- **PyTorch 2.0 compilation** — optional `--compile` flag for `torch.compile` acceleration (may increase VRAM usage)
 
 ### CLI Arguments Reference (Hybrid)
 
@@ -348,11 +362,13 @@ Both modes include:
 | `--fusion-channels` | 384 | Shared feature space width |
 | `--fusion-depth` | 2 | Number of fusion blocks |
 | `--attention-heads` | 8 | Multi-head attention heads |
+| `--num-workers` | 4 | DataLoader worker processes |
 | `--training-mode` | auto | `auto`, `small`, or `large` |
 | `--freeze-backbone-epochs` | auto | Epochs with frozen backbones (5 small / 0 large) |
 | `--class-balance` | auto | `auto`, `on`, or `off` |
 | `--pretrained` / `--no-pretrained` | on | Use ImageNet-1K weights |
 | `--amp` / `--no-amp` | on | Mixed precision training |
+| `--compile` | off | Enable PyTorch 2.0 model compilation |
 | `--patience` | 12 | Early stopping patience |
 | `--gradient-clip` | 1.0 | Max gradient norm |
 | `--audit-policy` | strict | `strict`, `warn`, or `off` |
@@ -360,6 +376,8 @@ Both modes include:
 | `--seed` | 42 | Random seed |
 | `--run-name` | ugvnet_hybrid | Experiment identifier |
 | `--device` | auto | `auto`, `cuda`, or `cpu` |
+| `--results-dir` | results | Output directory for metrics, CSVs, and plots |
+| `--models-dir` | models | Output directory for best and checkpoint models |
 | `--tensorboard` / `--no-tensorboard` | on | Enable TensorBoard diagnostics |
 | `--tensorboard-dir` | tensorboard | Root for timestamped event logs |
 | `--tensorboard-histogram-interval` | 5 | Selected parameter/gradient histogram interval; 0 disables |
@@ -378,11 +396,15 @@ Both modes include:
 | `--weight-decay` | 0.05 | AdamW weight decay |
 | `--label-smoothing` | 0.1 | Cross-entropy label smoothing |
 | `--dropout` | 0.1 | Dropout rate |
+| `--num-workers` | 4 | DataLoader worker processes |
+| `--compile` | off | Enable PyTorch 2.0 model compilation |
 | `--audit-policy` | strict | `strict`, `warn`, or `off` |
 | `--audit-workers` | auto | Image-scanning workers (0 = auto-detect) |
 | `--seed` | 42 | Random seed |
 | `--run-name` | ugvnet_lightweight | Experiment identifier |
 | `--device` | auto | `auto`, `cuda`, or `cpu` |
+| `--results-dir` | results | Output directory for metrics and CSVs |
+| `--models-dir` | models | Output directory for best and checkpoint models |
 | `--tensorboard` / `--no-tensorboard` | on | Enable TensorBoard diagnostics |
 | `--tensorboard-dir` | tensorboard | Root for timestamped event logs |
 | `--tensorboard-histogram-interval` | 5 | Selected parameter histogram interval; 0 disables |
@@ -394,7 +416,8 @@ If you encounter CUDA OOM errors, try these steps in order:
 1. Reduce batch size: `--batch-size 8`
 2. Reduce input resolution: `--image-size 224`
 3. Reduce fusion channels: `--fusion-channels 256`
-4. Disable mixed precision if it causes issues: `--no-amp`
+4. Remove `--compile` if enabled (compilation increases peak VRAM)
+5. Disable mixed precision if it causes issues: `--no-amp`
 
 ### Output Artifacts
 
@@ -409,6 +432,8 @@ in a saved notebook version.
 | Audit, metrics, CSV, JSON, and plots | `results/colab/` | `results/` |
 | Timestamped PDF and manifest | `reports/colab/` | `reports/` |
 | TensorBoard events | `tensorboard/colab/<run_name>/` | `tensorboard/<run_name>/` |
+| ONNX architecture export | `results/colab/ugvnet_architecture.onnx` | `results/ugvnet_architecture.onnx` |
+| Full architecture diagram | `results/colab/ugvnet_full_architecture.png` | `results/ugvnet_full_architecture.png` |
 
 The final notebook summary reports **Best Training Accuracy**, **Best Validation
 Accuracy**, and **Best Test Accuracy** in percentages and decimal form. The PDF
@@ -467,6 +492,34 @@ System telemetry includes process RAM, host RAM pressure, CPU load, disk usage a
 process I/O, PyTorch CUDA allocation/reservation/peak memory, and—when
 `nvidia-smi` is available—GPU utilization, device memory, temperature, and power.
 
+### Lightweight CLI TensorBoard
+
+The lightweight trainer also writes a comprehensive TensorBoard run including:
+
+- Model graph and parameter histograms
+- Per-epoch training/validation scalars (loss, accuracy)
+- Gradient histograms at configurable intervals
+- CPU/CUDA profiler trace (first epoch)
+- Per-class PR curves on the test set
+- Confusion matrix visualization
+- Test embeddings in the Projector
+- Sample prediction images
+- HParams comparison table
+
+### T4 Memory Safety
+
+When a T4 GPU (16 GB VRAM) is detected, the notebook automatically caps:
+
+- `TENSORBOARD_MAX_EMBEDDING_SAMPLES` to 256 (from 512)
+- `TENSORBOARD_LOG_FULL_MODEL_HISTOGRAMS` to `False`
+- `TENSORBOARD_MAX_GRADCAM_IMAGES` to 4
+- Profiler never uses `with_stack=True`
+- `torch.cuda.empty_cache()` is called after every heavy TensorBoard operation
+
+These caps keep TensorBoard fully functional without risking OOM crashes.
+
+### Viewing TensorBoard
+
 Colab logs persist at
 `/content/drive/MyDrive/SkinDisNet/ugvnet/tensorboard/colab`. Kaggle logs remain
 at `/kaggle/working/ugvnet/tensorboard`. Open Cell 14 before Cell 17 for live
@@ -490,6 +543,21 @@ embeddings, ROC, calibration, Grad-CAM, images, and profiler capture. Exhaustive
 dual-backbone histograms are implemented but disabled by default because they can
 substantially increase logging time and event-file size. Audio and Mesh remain
 excluded because UGVNet produces neither type of data.
+
+---
+
+## ONNX Export and Netron
+
+The notebooks export the trained model to ONNX format (with TorchScript
+fallback) and display it interactively in an inline Netron iframe. The
+exported ONNX file is saved alongside other results:
+
+- **Colab:** `results/colab/ugvnet_architecture.onnx`
+- **Kaggle:** `results/ugvnet_architecture.onnx`
+
+The ONNX path is also logged to TensorBoard under `Model/netron_export` for
+cross-referencing. Netron and TensorBoard run concurrently on separate ports
+without conflicts.
 
 ---
 
@@ -547,7 +615,8 @@ model = ugvnet_tiny(num_classes=7, in_channels=1)
 ```text
 ugvnet/
 ├── assets/
-│   └── architecture.png        # Architecture overview
+│   └── architecture.png        # Architecture overview diagram
+├── cache/                      # Dataset and Torch hub caches (git-ignored)
 ├── notebooks/
 │   ├── ugvnet_colab.ipynb      # Drive-oriented Colab workflow
 │   ├── ugvnet_kaggle.ipynb     # Kaggle-oriented workflow
@@ -557,17 +626,23 @@ ugvnet/
 │   ├── train_hybrid.py         # Recommended hybrid CLI trainer
 │   └── train_lightweight.py    # Lightweight CLI trainer
 ├── src/ugvnet/
-│   ├── __init__.py             # Public API
+│   ├── __init__.py             # Public API and version
 │   ├── data_audit.py           # Integrity and leakage scanner
 │   ├── hybrid.py               # EfficientNetV2-S + ConvNeXt-Tiny model
 │   └── lightweight.py          # Tiny, small, and base variants
 ├── tests/                      # pytest suite
+│   ├── test_hybrid.py          # Hybrid model output, fusion, and freeze tests
+│   ├── test_lightweight.py     # Variant shapes, reset, custom channels tests
+│   └── test_data_audit.py      # Corruption, leakage, and policy tests
 ├── models/                     # Best and resumable checkpoints
-├── results/                    # Audits, metrics, CSV/JSON, and plots
+│   ├── best/                   # Validation-selected best models
+│   └── checkpoints/            # Resumable last-epoch checkpoints
+├── results/                    # Audits, metrics, CSV/JSON, plots, and ONNX
 ├── reports/                    # Timestamped PDF reports and manifests
 ├── tensorboard/                # Event logs and TensorBoard usage notes
 ├── pyproject.toml              # Package metadata and dependencies
-├── LICENSE
+├── .gitignore                  # Ignores weights, caches, generated artifacts
+├── LICENSE                     # MIT License
 └── README.md
 ```
 
@@ -586,9 +661,9 @@ python -m pytest
 
 The test suite validates:
 
-- **Hybrid model** — output shapes, fusion weight probability distribution (sums to 1.0), backbone freeze/unfreeze behavior
-- **Lightweight model** — output shapes across variants, resolution flexibility, intermediate feature map dimensions, classifier reset, custom input channels, unknown variant rejection
-- **Dataset audit** — corrupt image detection, cross-split duplicate/leakage detection, strict policy enforcement, clean dataset pass-through
+- **Hybrid model** — output shapes, fusion weight probability distribution (sums to 1.0), backbone freeze/unfreeze behavior, invalid configuration rejection
+- **Lightweight model** — output shapes across variants, resolution flexibility, intermediate feature map dimensions, classifier reset, custom input channels, dtype preservation, unknown variant rejection
+- **Dataset audit** — corrupt image detection, cross-split duplicate/leakage detection, strict policy enforcement, invalid worker count rejection, clean dataset pass-through
 
 Tests use small tensor sizes and `pretrained=False` for fast CPU-only execution.
 
